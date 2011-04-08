@@ -1,0 +1,55 @@
+Experiments with using C-level co-routines (like Posix swapcontext()) to get
+non-blocking operation from libmysqlclient.
+
+-----------------------------------------------------------------------
+
+Here is a small example of suggested non-blocking API:
+
+
+    static void
+    wait_for_mysql(MYSQL *mysql, int status)
+    {
+      struct pollfd pfd;
+      p.fd= mysql_get_socket_fd(&mysql);
+      p.events=
+	(status & MYSQL_WAIT_READ ? POLLIN : 0) |
+	(status & MYSQL_WAIT_WRITE ? POLLOUT : 0);
+      poll(&pfd, 1, 0);
+    }
+
+
+    status= mysql_real_connect_start(&ret, &mysql, "localhost", "test", "testpass", "test",
+				     0, NULL, 0);
+    while (status)
+    {
+      wait_for_mysql(&mysql, status);
+      status= mysql_real_connect_cont(&ret, &mysql);
+    }
+
+
+    status= mysql_real_query_start(&err, &mysql, SL("SHOW STATUS"));
+    while (status)
+    {
+      wait_for_mysql(&mysql, status);
+      status= mysql_real_query_cont(&err, &mysql);
+    }
+
+
+    status= mysql_fetch_row_start(&row, res);
+    while (status)
+    {
+      wait_for_mysql(&mysql, status);
+      status= mysql_fetch_row_cont(&row, res);
+    }
+
+
+Idea is that if a call R=foo(...) can block, we introduce two more calls
+
+    S=foo_start(&R, ...)
+    S=foo_cont(&R, ...)
+
+
+S (status) returns 0 is the call is done; then R is set to the return value
+from the non-blocking call. When S returns non-zero, then the call is blocking
+on some condition; individual bits in S say what we are waiting for,
+eg. MYSQL_WAIT_READ or MYSQL_WAIT_WRITE.
