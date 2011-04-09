@@ -19,20 +19,11 @@
 
 /* Simple example of how one might use the swapcontext() etc. methods. */
 
-#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 
-#include <unistd.h>
-#include <ucontext.h>
 
-struct my_context {
-  void (*user_func)(void *);
-  void *user_data;
-  ucontext_t base_context;
-  ucontext_t spawned_context;
-  int active;
-};
+#include "my_context.h"
 
 enum wait_status {
   WAIT_READ= 1,
@@ -66,27 +57,9 @@ struct my_state {
   struct my_context async_context;
 };
 
-/*
-  The makecontext() only allows to pass integers into the created context :-(
-  We want to pass pointers, so we do it this kinda hackish way.
-  Anyway, it should work everywhere, and at least it does not break strict
-  aliasing.
-*/
-union pass_void_ptr_as_2_int {
-  int a[2];
-  void *p;
-};
-
 static int
 state_init(struct my_state *s)
 {
-  if (2*sizeof(int) < sizeof(void *))
-  {
-    fprintf(stderr,
-            "Error: Unable to store pointer in 2 ints on this architecture\n");
-    return -1;
-  }
-
   s->async_call_active= 0;
   s->stack_mem= malloc(STACK_SIZE);
   if (!s->stack_mem)
@@ -100,108 +73,6 @@ state_deinit(struct my_state *s)
 {
   if (s->stack_mem)
     free(s->stack_mem);
-}
-
-
-static void
-my_context_spawn_internal(i0, i1)
-{
-  int err;
-  struct my_context *c;
-  union pass_void_ptr_as_2_int u;
-
-  u.a[0]= i0;
-  u.a[1]= i1;
-  c= (struct my_context *)u.p;
-
-  (*c->user_func)(c->user_data);
-  c->active= 0;
-  err= setcontext(&c->base_context);
-  fprintf(stderr, "Aieie, setcontext() failed: %d (errno=%d)\n", err, errno);
-}
-
-
-/*
-  Resume an asynchroneous context. The context was spawned by
-  my_context_spawn(), and later suspended inside my_context_yield().
-
-  The asynchroneous context may be repeatedly suspended with
-  my_context_yield() and resumed with my_context_continue().
-
-  Each time it is suspended, this function returns 1. When the originally
-  spawned user function returns, this function returns 0.
-
-  In case of error, -1 is returned.
-*/
-int
-my_context_continue(struct my_context *c)
-{
-  int err;
-
-  if (!c->active)
-    return 0;
-
-  err= swapcontext(&c->base_context, &c->spawned_context);
-  if (err)
-  {
-    fprintf(stderr, "Aieie, swapcontext() failed: %d (errno=%d)\n",
-            err, errno);
-    return -1;
-  }
-
-  return c->active;
-}
-
-
-/*
-  Spawn an asynchroneous context. The context will run the supplied user
-  function, passing the supplied user data pointer.
-
-  The user function may call my_context_yield(), which will cause this
-  function to return 1. Then later my_context_continue() may be called, which
-  will resume the asynchroneous context by returning from the previous
-  my_context_yield() call.
-
-  When the user function returns, this function returns 0.
-
-  In case of error, -1 is returned.
-*/
-int
-my_context_spawn(struct my_context *c, void (*f)(void *), void *d,
-                 void *stack, size_t stack_size)
-{
-  int err;
-  union pass_void_ptr_as_2_int u;
-
-  err= getcontext(&c->spawned_context);
-  if (err)
-    return -1;
-  c->spawned_context.uc_stack.ss_sp= stack;
-  c->spawned_context.uc_stack.ss_size= stack_size;
-  c->spawned_context.uc_link= NULL;
-  c->user_func= f;
-  c->user_data= d;
-  c->active= 1;
-  u.p= c;
-  makecontext(&c->spawned_context, my_context_spawn_internal, 2,
-              u.a[0], u.a[1]);
-
-  return my_context_continue(c);
-}
-
-
-static int
-my_context_yield(struct my_context *c)
-{
-  int err;
-
-  if (!c->active)
-    return -1;
-
-  err= swapcontext(&c->spawned_context, &c->base_context);
-  if (err)
-    return -1;
-  return 0;
 }
 
 
