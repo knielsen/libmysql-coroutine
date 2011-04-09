@@ -26,10 +26,20 @@
 #include <unistd.h>
 #include <ucontext.h>
 
+struct my_context {
+  void (*user_func)(void *);
+  void *user_data;
+  ucontext_t base_context;
+  ucontext_t spawned_context;
+  int active;
+};
+
 enum wait_status {
   WAIT_READ= 1,
   WAIT_WRITE= 2
 };
+
+#define STACK_SIZE 16384
 
 struct my_state {
   /*
@@ -37,21 +47,23 @@ struct my_state {
     foo_start() call.
   */
   int async_call_active;
-
+  /* The wait status (WAIT_READ and/or WAIT_WRITE) when suspending. */
   int ret_status;
-  union {
-    int r_int;
-  } ret_result;
-  ucontext_t caller_context;
-  ucontext_t blocked_io_context;
-  char *stack_mem;
-
   /* Passing parameters for each different async call. */
   union {
     struct {
       int param;
     } p_foo;
   } param;
+  /* Return value from each different async call. */
+  union {
+    int r_int;
+  } ret_result;
+  /* Memory for stack for async context. */
+  char *stack_mem;
+
+  /* Implementation-specific async context. */
+  struct my_context async_context;
 };
 
 /*
@@ -64,8 +76,6 @@ union pass_void_ptr_as_2_int {
   int a[2];
   void *p;
 };
-
-#define STACK_SIZE 16384
 
 static int
 state_init(struct my_state *s)
@@ -92,26 +102,130 @@ state_deinit(struct my_state *s)
     free(s->stack_mem);
 }
 
+
+static void
+my_context_spawn_internal(i0, i1)
+{
+  int err;
+  struct my_context *c;
+  union pass_void_ptr_as_2_int u;
+
+  u.a[0]= i0;
+  u.a[1]= i1;
+  c= (struct my_context *)u.p;
+
+  (*c->user_func)(c->user_data);
+  c->active= 0;
+  err= setcontext(&c->base_context);
+  fprintf(stderr, "Aieie, setcontext() failed: %d (errno=%d)\n", err, errno);
+}
+
+
+/*
+  Resume an asynchroneous context. The context was spawned by
+  my_context_spawn(), and later suspended inside my_context_yield().
+
+  The asynchroneous context may be repeatedly suspended with
+  my_context_yield() and resumed with my_context_continue().
+
+  Each time it is suspended, this function returns 1. When the originally
+  spawned user function returns, this function returns 0.
+
+  In case of error, -1 is returned.
+*/
+int
+my_context_continue(struct my_context *c)
+{
+  int err;
+
+  if (!c->active)
+    return 0;
+
+  err= swapcontext(&c->base_context, &c->spawned_context);
+  if (err)
+  {
+    fprintf(stderr, "Aieie, swapcontext() failed: %d (errno=%d)\n",
+            err, errno);
+    return -1;
+  }
+
+  return c->active;
+}
+
+
+/*
+  Spawn an asynchroneous context. The context will run the supplied user
+  function, passing the supplied user data pointer.
+
+  The user function may call my_context_yield(), which will cause this
+  function to return 1. Then later my_context_continue() may be called, which
+  will resume the asynchroneous context by returning from the previous
+  my_context_yield() call.
+
+  When the user function returns, this function returns 0.
+
+  In case of error, -1 is returned.
+*/
+int
+my_context_spawn(struct my_context *c, void (*f)(void *), void *d,
+                 void *stack, size_t stack_size)
+{
+  int err;
+  union pass_void_ptr_as_2_int u;
+
+  err= getcontext(&c->spawned_context);
+  if (err)
+    return -1;
+  c->spawned_context.uc_stack.ss_sp= stack;
+  c->spawned_context.uc_stack.ss_size= stack_size;
+  c->spawned_context.uc_link= NULL;
+  c->user_func= f;
+  c->user_data= d;
+  c->active= 1;
+  u.p= c;
+  makecontext(&c->spawned_context, my_context_spawn_internal, 2,
+              u.a[0], u.a[1]);
+
+  return my_context_continue(c);
+}
+
+
+static int
+my_context_yield(struct my_context *c)
+{
+  int err;
+
+  if (!c->active)
+    return -1;
+
+  err= swapcontext(&c->spawned_context, &c->base_context);
+  if (err)
+    return -1;
+  return 0;
+}
+
+
+/*
+  This function is used to suspend an async call when we need to block for I/O.
+
+  The ret_status tells which condition(s) the calling application must wait for
+  before resuming us again with the appropriate foo_cont() method.
+*/
 static void
 my_yield(struct my_state *s, int ret_status)
 {
   int err;
 
-  if (!s->async_call_active)
-  {
-    fprintf(stderr, "Error: cannot yield when call not active.\n");
-    return;
-  }
-
   /*
-    Switch to main context so it can return our wait status.
-    When we are restarted in foo_cont(), the swapcontext() call will return 0
+    Switch to main context so it can return our wait status. When we are
+    restarted in foo_cont(), the my_context_yield() call will return 0
   */
   s->ret_status= ret_status;
-  err= swapcontext(&s->blocked_io_context, &s->caller_context);
+  err= my_context_yield(&s->async_context);
   if (err)
-    fprintf(stderr, "Aieie, swapcontext() returns error: %d\n", err);
+    fprintf(stderr, "Aieie, my_context_yield() returns error: %d\n", err);
 }
+
 
 /*
   This is the wrapper for our blocking call.
@@ -160,23 +274,18 @@ foo(struct my_state *s, int param)
 }
 
 static void
-foo_start_internal(i1, i2)
+foo_start_internal(void *d)
 {
   int ret;
   int err;
-  union pass_void_ptr_as_2_int u;
   struct my_state *s;
 
-  u.a[0]= i1;
-  u.a[1]= i2;
-  s= (struct my_state *)u.p;
+  s= (struct my_state *)d;
 
   ret= foo(s, s->param.p_foo.param);
   s->async_call_active= 0;
   s->ret_result.r_int= ret;
-  s->ret_status= 0;
-  err= setcontext(&s->caller_context);
-  fprintf(stderr, "Aieie, setcontext() failed: %d (errno=%d)\n", err, errno);
+  s->ret_status= 0;                             /* 0 means we are done */
 }
 
 /*
@@ -186,42 +295,37 @@ foo_start_internal(i1, i2)
 static int
 foo_start(int *ret, struct my_state *s, int param)
 {
-  int err;
-  union pass_void_ptr_as_2_int u;
+  int res;
 
-  /*
-    Create a new context for the actual call, so we can suspend it in case we
-    need to block on I/O.
+  /* Spawn the actual call in a separate context, so we can suspend it in case
+    we need to block on I/O.
   */
-  err= getcontext(&s->blocked_io_context);
-  if (err)
-    return 1;
-  s->blocked_io_context.uc_stack.ss_sp= s->stack_mem;
-  s->blocked_io_context.uc_stack.ss_size= STACK_SIZE;
-  s->blocked_io_context.uc_link= NULL;
   s->param.p_foo.param= param;
-  u.p= s;
-  makecontext(&s->blocked_io_context, foo_start_internal, 2, u.a[0], u.a[1]);
   s->async_call_active= 1;
-
-  err= swapcontext(&s->caller_context, &s->blocked_io_context);
-  if (err)
+  res= my_context_spawn(&s->async_context, foo_start_internal, s,
+                        s->stack_mem, STACK_SIZE);
+  if (res < 0)
   {
-    fprintf(stderr, "Aieie, swapcontext() failed: %d\n", err);
-    *ret= -1;
+    /* Error. */
+    return 1;
+  }
+  else if (res > 0)
+  {
+    /* Suspended. */
+    return s->ret_status;
+  }
+  else
+  {
+    /* Finished. */
+    *ret= s->ret_result.r_int;
     return 0;
   }
-
-  if (!s->ret_status)
-    *ret= s->ret_result.r_int;
-
-  return s->ret_status;
 }
 
 static int
 foo_cont(int *ret, struct my_state *s)
 {
-  int err;
+  int res;
 
   if (!s->async_call_active)
   {
@@ -231,18 +335,24 @@ foo_cont(int *ret, struct my_state *s)
     return 0;
   }
 
-  err= swapcontext(&s->caller_context, &s->blocked_io_context);
-  if (err)
+  res= my_context_continue(&s->async_context);
+  if (res < 0)
   {
-    fprintf(stderr, "Aieie, swapcontext() failed: %d\n", err);
+    fprintf(stderr, "Aieie, my_context_continue() failed: %d\n", res);
     *ret= -1;
     return 0;
   }
-
-  if (!s->ret_status)
+  else if (res > 0)
+  {
+    /* Suspended again. */
+    return s->ret_status;
+  }
+  else
+  {
+    /* Finished. */
     *ret= s->ret_result.r_int;
-
-  return s->ret_status;
+    return 0;
+  }
 }
 
 int
