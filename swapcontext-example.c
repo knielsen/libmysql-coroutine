@@ -255,5 +255,7 @@ main(int argc, char *argv[])
   }
   printf("Async done: %d\n", ret);
 
+  state_deinit(&s);
+
   return 0;
 }

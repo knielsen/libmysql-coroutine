@@ -1,5 +1,10 @@
 *~
+*.o
+*.s
 sync-example1
 async-example1
 swapcontext-example
+gcc_amd64_example
 a.out
+x
+install

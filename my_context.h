@@ -27,6 +27,7 @@
   (This particular implementation uses Posix ucontext swapcontext().)
 */
 
+#ifdef USE_UCONTEXT
 #include <ucontext.h>
 
 struct my_context {
@@ -36,7 +37,15 @@ struct my_context {
   ucontext_t spawned_context;
   int active;
 };
+#endif
 
+#ifdef USE_GCC_AMD64
+#include <stdint.h>
+
+struct my_context {
+  uint64_t save[17];
+};
+#endif
 
 /*
   Spawn an asynchroneous context. The context will run the supplied user
