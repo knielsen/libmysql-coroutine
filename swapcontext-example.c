@@ -27,7 +27,8 @@
 
 enum wait_status {
   WAIT_READ= 1,
-  WAIT_WRITE= 2
+  WAIT_WRITE= 2,
+  WAIT_TIMEOUT= 4                     /* ToDo: pass timeout value somewhere */
 };
 
 #define STACK_SIZE 16384

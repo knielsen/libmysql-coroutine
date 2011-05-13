@@ -40,6 +40,13 @@ wait_for_mysql(MYSQL *mysql, int status)
 }
 
 static void
+fatal(MYSQL *mysql, const char *msg)
+{
+  fprintf(stderr, "%s: %s\n", msg, mysql_error(&mysql));
+  exit(1);
+}
+
+static void
 doit(void)
 {
   int err;
@@ -51,7 +58,7 @@ doit(void)
   mysql_init(&mysql);
   mysql_options(&mysql, MYSQL_READ_DEFAULT_GROUP, "myapp");
 
-  /* Returns 0 when done, flag for what is waiting for when need to block. */
+  /* Returns 0 when done, else flag for what to wait for when need to block. */
   status= mysql_real_connect_start(&ret, &mysql, "localhost", "test", "testpass", "test",
                                    0, NULL, 0);
   while (status)
@@ -61,10 +68,7 @@ doit(void)
   }
 
   if (!ret)
-  {
-    fprintf(stderr, "Failed to mysql_real_connect(): %s\n", mysql_error(&mysql));
-    exit(1);
-  }
+    fatal(&mysql, "Failed to mysql_real_connect()");
 
   status= mysql_real_query_start(&err, &mysql, SL("SHOW STATUS"));
   while (status)
@@ -73,18 +77,12 @@ doit(void)
     status= mysql_real_query_cont(&err, &mysql);
   }
   if (err)
-  {
-    fprintf(stderr, "mysql_real_query() returns error: %s\n", mysql_error(&mysql));
-    exit(1);
-  }
+    fatal(&mysql, "mysql_real_query() returns error");
 
   /* This method cannot block. */
   res= mysql_use_result(&mysql);
   if (!res)
-  {
-    fprintf(stderr, "mysql_use_result() returns error: %s\n", mysql_error(&mysql));
-    exit(1);
-  }
+    fatal(&mysql, "mysql_use_result() returns error");
 
   for (;;)
   {
@@ -99,9 +97,7 @@ doit(void)
     printf("%s: %s\n", row[0], row[1]);
   }
   if (mysql_errno(&mysql))
-  {
-    fprintf(stderr, "Got error while retrieving rows: %s\n", mysql_error(&mysql));
-  }
+    fatal(&mysql, "Got error while retrieving rows");
 
   /* I suppose this must be non-blocking too. */
   mysql_close(&mysql);
