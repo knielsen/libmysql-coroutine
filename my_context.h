@@ -27,7 +27,20 @@
   (This particular implementation uses Posix ucontext swapcontext().)
 */
 
-#ifdef USE_UCONTEXT
+#ifdef __WIN__
+#define MY_CONTEXT_USE_WIN32_FIBERS 1
+#elif defined(__GNUC__) && __GNUC__ >= 3 && defined(__x86_64__)
+#define MY_CONTEXT_USE_X86_64_GCC_ASM
+#else
+#define MY_CONTEXT_USE_UCONTEXT
+#endif
+
+#ifdef MY_CONTEXT_USE_WIN32_FIBERS
+#error Windows Fiber-based my_context not yet implemented
+#endif
+
+
+#ifdef MY_CONTEXT_USE_UCONTEXT
 #include <ucontext.h>
 
 struct my_context {
@@ -39,7 +52,8 @@ struct my_context {
 };
 #endif
 
-#ifdef USE_GCC_AMD64
+
+#ifdef MY_CONTEXT_USE_X86_64_GCC_ASM
 #include <stdint.h>
 
 struct my_context {
